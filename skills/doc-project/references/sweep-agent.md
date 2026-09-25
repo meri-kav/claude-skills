@@ -13,6 +13,11 @@ small. `S` = `~/.claude/skills/doc-project`, `B` = `python3 S/scripts/bookmark.p
    comment `query`). Do not call the docs `guide` and do not read tab contents yet. A tab in the
    list that `plan` did not name is new: `B tab <doc_id> <tab_id> --name "<name>" --body
    <body_id>`, then query its comments from seq 0.
+   **Hanging listings (seen 2026-09-25):** a comment `query` with `under` a whole tab (`object:
+   "file"`) can hang for 10+ minutes on tabs with long comment histories, which stalls the whole
+   sweep. If `plan` prints file-scoped queries, run them `under` the tab's body node
+   (`object: "node"`) with `limit` 10 to 40, paging with `afterSeq`; on a timeout, retry once
+   with a smaller limit, then skip that tab and say so in the return.
 3. A hook appends a sorted work list to each query result and moves the bookmark itself on a
    quiet tab. If every tab is quiet, `prmap` printed no change and no Running row is overdue:
    run `B swept <doc_id>` and return `quiet`. Nothing else.
@@ -55,21 +60,27 @@ and `S/references/sweep.md` (sections 3 and 4, Editing traps).
   - what the doc already says on it, and where to look (repos, paths, tables);
   - the limits: production read-only, no PRs, no messages;
   - what to post when done: the finding in the thread, with evidence and what was not checked,
-    and the Running row in Overview marked landed or failed.
+    and the Running row in Overview marked landed or failed;
+  - for any UI mock, render or screenshot: run the local stack (pacific-site against a local
+    pacific-server, fake data) and screenshot the real pages, never standalone HTML with copied
+    CSS. To show a proposal, change the site or server code so the page looks like it, screenshot,
+    then undo: do it in a throwaway worktree (`git worktree add` off origin/main) that is removed
+    afterwards, never in a checkout someone is working in; never commit or push it. How: memory `reference_screenshotting_pacific_site.md` (production build plus a
+    hand-made Supabase cookie) and `reference_running_site_pr_against_local_server.md`.
 
   Reply "Started a longer run for this; progress is on the Running line in Overview", add a
   Running row (what, started, running), and list the handoff path in your return.
 - **Actions outside the doc** (a prod write, a PR, a message): never. List them for the main
   session as "waiting on Meri's yes".
-- A hook blocks dashes, history wording and secrets in doc writes, and blocks resolves. If a
-  write is refused, fix the text and resend.
+- A hook blocks dashes, history wording, secrets and unhighlighted words in doc writes, and
+  blocks resolves. If a write is refused, fix it and resend. How to highlight: `sweep.md`,
+  Editing traps.
 
 ## 4. Close out
 
 1. For each tab that had work, re-list its comments so your replies are included, then run
    `B tab <doc_id> <tab_id> --rev <latest rev you saw> --seq observed`.
-2. If anything changed: update the Overview header, Needs you and the PR map, and add one
-   Activity row.
+2. If anything changed: update the Overview header, Needs you and the PR map.
 3. `B swept <doc_id>`.
 
 ## 5. Return

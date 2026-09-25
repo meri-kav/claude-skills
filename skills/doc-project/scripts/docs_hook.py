@@ -118,7 +118,8 @@ def pre(tool: str, tool_input: dict) -> dict | None:
         (tool_input.get("container") or {}).get("create"))
     found = lint(texts, doc_body=not is_comment)
     if not found:
-        return None
+        problem = None if is_comment else highlight_problem(tool, tool_input)
+        return _deny("Doc write blocked: " + problem + HIGHLIGHT_FIX) if problem else None
     return _deny(
         "Doc write blocked:\n- " + "\n- ".join(found[:8])
         + "\nFix: commas, colons or periods instead of dashes. State the current plan; history wording is"
@@ -126,6 +127,49 @@ def pre(tool: str, tool_input: dict) -> dict | None:
         " today, ...\"). Keep secrets out; say where they live. If the dash is in the user's own words, target"
         " your edit narrowly with find instead of rewriting their text."
     )
+
+
+CHIP_TOKEN = re.compile(r"<\?claude block [^?]*\?>")
+FAKE_HIGHLIGHT = re.compile(r"(?<![=\w])==(?=\S)[^=\n]*?(?<=\S)==(?!=)|</?mark>")
+
+
+def _prose_ops(tool: str, tool_input: dict) -> list[dict]:
+    if tool == "update":
+        return _payload(tool_input).get("ops") or []
+    ops = []
+    for member in tool_input.get("batch") or []:
+        if isinstance(member, dict) and member.get("verb") == "update":
+            p = member.get("payload")
+            ops += (p.get("ops") or []) if isinstance(p, dict) else []
+    return ops
+
+
+def _writes_words(op: dict) -> bool:
+    src = op.get("source") or op.get("with")
+    if op.get("op") not in ("insert", "replace") or not isinstance(src, dict):
+        return False
+    return any(CHIP_TOKEN.sub("", t).strip() for t in _texts(src.get("from")))
+
+
+def highlight_problem(tool: str, tool_input: dict) -> str | None:
+    """Returns why a write to a tracked doc breaks the highlight rule, or None."""
+    ops = _prose_ops(tool, tool_input)
+    if any(FAKE_HIGHLIGHT.search(t) for t in _texts(ops)):
+        return "==text== and <mark> print literally in a doc; use the highlight mark."
+    container = (tool_input.get("container") or {}).get("id", "")
+    if not container or "create" in (tool_input.get("container") or {}) or _state_path(container) is None:
+        return None
+    if any(_writes_words(op) for op in ops) and '"highlight"' not in json.dumps(ops):
+        return "every word Claude writes in a tracked doc carries the highlight mark."
+    return None
+
+
+HIGHLIGHT_FIX = (
+    "\nFix: new blocks go in as \"as\":\"blocks\" with {\"type\":\"highlight\"} in each text node's marks"
+    " (keep link and bold marks beside it); reworded words go in as a find replace with \"as\":\"inline\""
+    " and the same mark; or send the markdown, then a find replace \"as\":\"inline\" of the new words with"
+    " the mark in the same call."
+)
 
 
 def _deny(reason: str) -> dict:
@@ -182,8 +226,11 @@ def post(tool: str, tool_input: dict, resp) -> dict | None:
     under = payload.get("under") or {}
     rows = sorted(data.get("rows") or [], key=lambda r: r.get("seq", 0))
     note, quiet = sort_rows(rows, set(state.get("my_replies", [])))
-    if under.get("object") == "file":
-        tab = state.setdefault("tabs", {}).setdefault(under["id"], {"rev": 0, "seq": 0})
+    tab_id = under.get("id") if under.get("object") == "file" else next(
+        (t for t, v in state.get("tabs", {}).items() if under.get("object") == "node" and v.get("body_id") == under.get("id")),
+        None)
+    if tab_id:
+        tab = state.setdefault("tabs", {}).setdefault(tab_id, {"rev": 0, "seq": 0})
         if rows:
             tab["observed_seq"] = max(tab.get("observed_seq", 0), rows[-1]["seq"])
         name = tab.get("name", under["id"])
