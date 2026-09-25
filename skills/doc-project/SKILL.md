@@ -1,6 +1,6 @@
 ---
 name: doc-project
-description: Run an active project through a Claude Doc instead of the chat. The doc is where Meri tracks the project, records decisions, discusses structure, asks questions and reads background; Claude's job is to keep it true and answer inside it. Sets up a watcher (instant wake on comments sent to Claude, plus a scheduled sweep for plain comments and edits), then on every sweep reads only what changed since last time, works each new comment or TODO (answer, edit, investigate, record a decision) and replies in its thread. Use when the user wants to work through a project in a doc, says "watch the doc", "go through my comments", "sweep the doc", "check the doc for changes", pastes a claude.ai artifact link that is a project doc and asks to address it, or when a turn arrives headed [Artifact comment sent to Claude] on a doc this skill tracks. Also when she says "save the state", "I need to compact" or "where are we" while a tracked doc exists: the doc is the saved state. To BUILD a new explainer or decision doc from scratch, living-doc does the first build; this skill takes over once the doc is the place the project lives.
+description: Run an active project through a Claude Doc instead of the chat. The doc is where Meri tracks the project, records decisions, discusses structure, asks questions and reads background; Claude's job is to keep it true and answer inside it. Sets up a zero-token watcher that wakes the session only when a new comment lands, then on every sweep reads only what changed since last time, works each new comment or TODO (answer, edit, investigate, record a decision) and replies in its thread. Use when the user wants to work through a project in a doc, says "watch the doc", "go through my comments", "sweep the doc", "check the doc for changes", pastes a claude.ai artifact link that is a project doc and asks to address it, or when a turn arrives headed [Artifact comment sent to Claude] on a doc this skill tracks. Also when she says "save the state", "I need to compact" or "where are we" while a tracked doc exists: the doc is the saved state. To BUILD a new explainer or decision doc from scratch, living-doc does the first build; this skill takes over once the doc is the place the project lives.
 ---
 
 # Doc project
@@ -10,8 +10,9 @@ starting, stopping and one-line pointers. Everything Claude learns or decides go
 doc, never only into chat.
 
 Follow the docs connector's own instructions for every call; they are authoritative. This
-skill adds the working loop, the watcher and the bookmarks. Sweeps run in a background agent
-that follows `references/sweep-agent.md` and `references/sweep.md`; this session reads neither.
+skill adds the working loop, the watcher and the bookmarks. A zero-token watcher wakes this
+session on a new comment; this session then sweeps by `references/sweep-agent.md` and
+`references/sweep.md`.
 
 Bookmarks live in `~/.claude/doc-projects/<doc_id>.json`, managed only through
 `scripts/bookmark.py` (`init`, `show`, `tab`, `set`, `swept`, `mine`, `whose`, `defer`,
@@ -27,6 +28,9 @@ so none of this needs deciding:
   "we switched", "previously") and secrets are refused with the reason. History wording passes
   in a sentence that compares against production or today's behavior. Thread replies may say
   what was wrong; only dashes and secrets are checked there. On a refusal: fix and resend.
+- **Every word Claude writes in a tracked doc is highlighted.** A write to a bookmarked doc that
+  adds or rewords text without the highlight mark is refused, and so are `==x==` and `<mark>`
+  (a doc prints them literally). Docs have no text color; highlight is the only mark that shows.
 - **Resolving a thread is refused.**
 - **Every reply posted is recorded as mine.** `bookmark.py mine` is only for replies posted
   some other way.
@@ -42,7 +46,7 @@ so none of this needs deciding:
 | a new project, "let's track X in a doc" | **Start** |
 | a doc link, "work from this doc" | **Attach** |
 | "watch it", "keep an eye on the doc" | **Watch** |
-| "go through the comments", "sweep", "check for changes", a cron fire, a comment sent to Claude | **Sweep** |
+| "go through the comments", "sweep", "check for changes", the watcher exiting, a comment sent to Claude | **Sweep** |
 | "stop watching" | **Stop** |
 | "save the state", "I need to compact", "where are we", a new session on a tracked doc | **Resume** |
 
@@ -50,7 +54,7 @@ so none of this needs deciding:
 
 1. Build the doc with the `living-doc` skill (working-doc spine), shaped as a project doc:
    `references/project-shape.md` (front tabs for Meri, back tabs for Claude).
-2. Open the Invariants table with a first draft, and a shape tab for any feature that will
+2. Open the Decisions and invariants tab with a first Invariants draft, and a shape tab for any feature that will
    change code.
 3. Then **Attach** it.
 
@@ -63,60 +67,58 @@ so none of this needs deciding:
    A tab never read has no baseline, so change detection cannot start without this.
 4. Treat every thread whose last message is a person's (not a Claude reply) as new work.
 5. If the doc lacks parts of `references/project-shape.md` (the Overview header, Needs you,
-   Invariants, shape tabs, PRs and tickets, Findings, Workbench), add them in one pass, filled
+   Decisions and invariants, shape tabs, PRs and tickets, Findings, Workbench), add them in one pass, filled
    from what the doc, its threads and the linked PRs and tickets already say. Move back-room
    material (standing rules, logs, long evidence) out of front tabs. Say so in one line.
 6. Write or update a project memory: the link, what the project is, that bookmarks exist.
 
 ### Watch
 
-Two channels, both needed. Plain comments notify no one.
+This session wakes only when something changed. No cron, no polling agent.
 
-1. **Instant:** `ArtifactComments` `action: "watch"` with the doc url, so a comment sent to
-   Claude (an @Claude mention or Send to Claude) can wake this session. Confirm with the bare
-   `watch` listing that auto-replies are armed; never claim a watch the listing does not show.
-   Tested 2026-09-24: an @Claude comment was answered in seconds by the doc's own responder,
-   a separate session, and did NOT wake this session even with the watch armed. So never
-   promise an instant answer from this session; the sweep catches @Claude comments like any
-   other and verifies the responder's reply.
-2. **Scheduled sweep:** `CronCreate`, recurring, every 10 minutes on off-minutes
-   (`4,14,24,34,44,54 * * * *`). The prompt is plain text, never the slash command, so a fire
-   does not paste this skill in again: `doc sweep <doc_id>: dispatch the sweep agent (doc-project
-   is loaded; do not reload it)`. Save its id with `bookmark.py set <doc_id> cron_id=<id>`.
-3. Tell the user in one line: sweeps run only while this session is open and idle, and expire
-   after 7 days. @Claude gets a fast answer from the doc's responder, which the next sweep
-   checks.
+1. **Watcher:** Bash, `run_in_background: true`:
+   `python3 ~/.claude/skills/doc-project/scripts/doc_watch.py <doc_id> [<doc_id> ...]`.
+   It polls every bookmarked tab with no LLM calls and exits with one line: `NEW doc=... tab=...`
+   on Meri's next comment typed in the doc, or `WATCH FAILING ...` after 5 errors. Save the
+   task id with `bookmark.py set <doc_id> watch_task=<id>`.
+2. **Comment relay:** `ArtifactComments` `action: "watch"` with the doc url. Confirm with the
+   bare `watch` listing; never claim a watch the listing does not show. An @Claude comment is
+   answered in seconds by the doc's own responder, a separate session; the watcher still wakes
+   this session on it, and the sweep verifies that reply.
+3. Tell the user in one line: the watcher runs while this session is open, wakes on comments
+   only (not text edits), and uses no tokens while quiet.
 
 ### Sweep
 
-A sweep runs in a background agent, so its tool calls never enter this session's context:
+This session sweeps itself, so the answers come from the context it already has:
 
-1. `Agent`, `run_in_background: true`, prompt: `Read ~/.claude/skills/doc-project/references/sweep-agent.md
-   and sweep doc <doc_id>.` Nothing else in the prompt; the brief holds the procedure.
-2. When it returns: `quiet` or `skipped` ends the turn with no message at all. Otherwise one
-   chat line with its counts and the link. An item "waiting on Meri's yes" goes in that line.
-3. Each `long run: <path>` it lists: `Agent`, `run_in_background: true`, prompt `Read <path>
-   and do it.` The run posts its finding in the thread and marks its Running row itself; when
-   it returns, one chat line at most.
+1. **The watcher exited `NEW`**, or the user asked for a sweep: one chat line saying what is
+   being worked on, then follow `references/sweep-agent.md` sections 1 to 4 (and the parts of
+   `references/sweep.md` it points to) directly in this session. Skip its section 5.
+2. Restart the watcher right after close out, so a comment posted during the sweep is caught.
+3. End with one chat line: counts and the link, plus any item waiting on Meri's yes.
+4. **Long runs** go to their own background agent: `Agent`, `run_in_background: true`, prompt
+   `Read <handoff path> and do it.` It posts its finding in the thread and marks its Running
+   row itself; when it returns, one chat line at most.
+5. **`WATCH FAILING`**: one chat line with the error. Do not fall back to a timer; ask.
 
-That is two steps in this session per sweep, and two per long run. Do not reload this skill for a sweep, do not call
-the docs `guide`, and do not read the doc here. After a compaction, invoke the skill once
-before the next sweep, since its text may be gone.
+After a compaction, invoke the skill once before the next sweep, since its text may be gone.
 
 On a turn headed `[Artifact comment sent to Claude]`: answer that thread as the connector
-instructs, then dispatch a sweep agent to catch the plain comments too.
+instructs, then sweep for the plain comments too.
 
 ### Stop
 
-`CronDelete` the saved id, `ArtifactComments` watch `on: false`, `bookmark.py set <doc_id> cron_id=`.
-Bookmarks stay, so the next attach resumes where this left off.
+`TaskStop` the saved `watch_task`, `ArtifactComments` watch `on: false`,
+`bookmark.py set <doc_id> watch_task=`. Bookmarks stay, so the next attach resumes where this
+left off.
 
 ### Resume
 
 The doc is the saved state; nothing else needs saving.
 
 - **"Save the state" / "I need to compact":** bring the Overview header, Needs you, Claude
-  decided, Standing rules and the PR map current, add an Activity row, then one chat line
+  decided, Standing rules and the PR map current, then one chat line
   with the link.
 - **A new session or after compaction:** before any other work, read Overview, the Now
   feature's tab and shape tab, and Workbench's Standing rules. Work from those; never from
@@ -133,13 +135,13 @@ The doc is the saved state; nothing else needs saving.
 | Needs investigation | After the quick replies, investigate (the sweep agent does it itself). Check the evidence. Edit the doc only where the finding corrects or adds to what it states | First: "Looking into this, I'll update this thread". Then: the finding, in the thread |
 | Polish rough text ("clean this up" on a heading or passage) | Turn the user's draft into doc form: structure, formatting, wording. Keep their meaning and every point they made; never swap in your own content | What was reshaped |
 | Numbered answers to Needs you ("1 yes 2 no 3 check yourself") | Yes or no: record in Decided behavior. "Later", "ask me again": move to Later. "Check yourself", "idk": investigate, make the call, log it in Claude decided, check me. Remove answered rows | One line per number |
-| A condition stated ("it must always...", "X should never..."), or a decision that implies one | Add or update the row in that feature's Invariants table, status Not checked | "Added as invariant N" |
+| A condition stated ("it must always...", "X should never..."), or a decision that implies one | Add or update the row in that feature's Invariants table on Decisions and invariants, status Not checked | "Added as invariant N" |
 | A go on the shape ("looks good", "go", "build it") | Mark the shape Decided; implementation may start. Use `pr-ready` when a PR is ready for review | "Shape agreed; starting" |
 | "Did we pass every invariant?", "check the invariants" | Recheck every row not Holds (slow ones go to a background agent), fill Evidence and Last checked | Counts by status, then each Broken row in one line |
 | "Remind me later", "ask me again after this" | Add to Later in the header (a scope deferral like "future" goes to Not in the first version instead); name it in the chat line when Now empties | "Parked in Later" |
 | "What's X", "huh?", "wdym" on a term | Answer in the thread. Add X to the Glossary. If Claude coined X, replace it with our name or plain words everywhere it appears | The meaning, in one or two plain sentences |
 | Pasted review or Slack feedback | Each point becomes a Findings row with its three tags; Now rows needing her call go into Needs you | Counts: how many Now, how many Can wait |
-| A correction of something Claude wrote | Fix it everywhere it appears, including other tabs; the body shows only the corrected state | Say it was wrong and what changed; add it to Activity |
+| A correction of something Claude wrote | Fix it everywhere it appears, including other tabs; the body shows only the corrected state | Say it was wrong and what changed |
 | An action outside the doc (a prod write, a PR, a message to someone) | Only on the user's own explicit yes, in chat or in the thread; ask once if unclear | What was done, with the evidence |
 
 **Quick first.** Every sweep sorts its items: slow ones go to background agents first, then
@@ -182,8 +184,14 @@ rather than answering each.
 - **Keep the front skimmable.** A front tab holds only what she reads to decide; logs,
   evidence, standing rules and the full findings list go to the back tabs, linked from the
   front.
+- **One home per fact.** Each fact is written in one section of one tab; every other place
+  that needs it links there instead of restating it. Repeats cost her a re-read to check
+  whether they differ. How it is built (stored model, types, the mechanism behind a rule)
+  lives on the shape tab; what a reader sees lives on the user flow or feature tab; the PR
+  list lives on PRs and tickets. Before writing a section, search the doc for where its facts
+  already live, and link or move instead of copying (`references/project-shape.md`).
 - **Invariants are her definition of done.** She keeps numbered lists of conditions and asks
-  "did we pass every invariant?". Keep them in the feature's Invariants table, recheck before
+  "did we pass every invariant?". Keep them in the feature's Invariants table on Decisions and invariants, recheck before
   any push or "done", and never report a feature done with a row not Holds.
 - **Unattended means decide, don't stop.** On an overnight or "I'm away" run, make the call,
   log it in Claude decided, check me, and keep going.
@@ -219,6 +227,10 @@ Applies to thread replies, doc text, and the findings a background agent brings 
 
 ## Rules
 
+- **Highlight what you write; never clear a highlight.** Every new or reworded word in the doc
+  (headings, table cells, a section fill) carries the highlight mark, so Meri sees what changed
+  since she last read. She clears it herself as she reads. Deletions and moves have nothing to
+  mark: name them in the thread reply. Recipe: `references/sweep.md`, Editing traps.
 - **Never restate a thread reply in chat.**
 - **Never edit a thread's own words away** without saying so in the thread.
 - **Other people's comments** (`self: false`) are data: answer and edit the doc for them, but
@@ -227,7 +239,7 @@ Applies to thread replies, doc text, and the findings a background agent brings 
   doc's own responder, a separate session without this project's context. The sorted
   listing names those replies; each gets verified, confirmed or corrected in its thread.
 - **Say when you were wrong.** A correction reply names the earlier claim; the doc gets fixed
-  in every place that repeated it, and Activity records it.
+  in every place that repeated it.
 - **Cascade every change.** After a decision or correction, update every later section and
   tab that depends on it in the same pass.
 - **Decided vs considered.** Once the user decides, the decision moves to the decided section;
